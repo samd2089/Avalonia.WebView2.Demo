@@ -68,6 +68,14 @@ namespace Avalonia.WebView2.Demo.Views
                     {
                         GlobalProxyTextBox.Text = _proxyAddress;
                     }
+                    if (TodayFirstCheckBox != null)
+                    {
+                        TodayFirstCheckBox.IsChecked = model?.TodayFirst ?? false; // default: Early first
+                    }
+                    if (EnableGoToGameCheckBox != null)
+                    {
+                        EnableGoToGameCheckBox.IsChecked = model?.EnableGoToGame ?? true; // default: keep existing behavior
+                    }
                     if (!string.IsNullOrWhiteSpace(_proxyAddress))
                         AddDownloadItem($"Loaded proxy: {_proxyAddress}", "Info");
                 }
@@ -83,7 +91,12 @@ namespace Avalonia.WebView2.Demo.Views
             try
             {
                 var path = GetConfigPath();
-                var json = JsonSerializer.Serialize(new AppSettings { ProxyAddress = _proxyAddress });
+                var json = JsonSerializer.Serialize(new AppSettings
+                {
+                    ProxyAddress = _proxyAddress,
+                    TodayFirst = TodayFirstCheckBox?.IsChecked ?? false,
+                    EnableGoToGame = EnableGoToGameCheckBox?.IsChecked ?? true,
+                });
                 File.WriteAllText(path, json);
                 AddDownloadItem("Settings saved.", "Success");
             }
@@ -96,6 +109,8 @@ namespace Avalonia.WebView2.Demo.Views
         private class AppSettings
         {
             public string? ProxyAddress { get; set; }
+            public bool? TodayFirst { get; set; }
+            public bool? EnableGoToGame { get; set; }
         }
 
         private async Task EnsureWebViewReadyAsync()
@@ -197,7 +212,7 @@ namespace Avalonia.WebView2.Demo.Views
                 }
                 else
                 {
-                    Console.WriteLine("not find page，waiting...");
+                    Console.WriteLine("not find page, waiting...");
                     page = await context.WaitForPageAsync(new() { Timeout = 10000 });
                 }
             }
@@ -267,7 +282,7 @@ namespace Avalonia.WebView2.Demo.Views
             }
             catch (OperationCanceledException)
             {
-                Console.WriteLine("timeout，retry");
+                Console.WriteLine("timeout, retry");
             }
             catch (Exception ex)
             {
@@ -523,11 +538,24 @@ namespace Avalonia.WebView2.Demo.Views
         {
             await CloseOrder();
 
-            if (await TryFindMatchInEarlyAsync(gameType, $"#mainShow_{ecid}", $"#league_{leagueId}"))
-                return true;
+            var todayFirst = TodayFirstCheckBox?.IsChecked == true;
 
-            if (await TryFindMatchInTodayAsync(gameType, $"#game_{ecid}", $"#mainShow_{ecid}", $"#LEG_{leagueId}"))
-                return true;
+            if (todayFirst)
+            {
+                if (await TryFindMatchInTodayAsync(gameType, $"#game_{ecid}", $"#mainShow_{ecid}", $"#LEG_{leagueId}"))
+                    return true;
+
+                if (await TryFindMatchInEarlyAsync(gameType, $"#mainShow_{ecid}", $"#league_{leagueId}"))
+                    return true;
+            }
+            else
+            {
+                if (await TryFindMatchInEarlyAsync(gameType, $"#mainShow_{ecid}", $"#league_{leagueId}"))
+                    return true;
+
+                if (await TryFindMatchInTodayAsync(gameType, $"#game_{ecid}", $"#mainShow_{ecid}", $"#LEG_{leagueId}"))
+                    return true;
+            }
 
             return false;
         }
@@ -541,7 +569,10 @@ namespace Avalonia.WebView2.Demo.Views
 
             await GoToTabAsync("#today_page");
 
-            await GoToGameAsync($"#symbol_{gameType}");
+            if (EnableGoToGameCheckBox?.IsChecked == true)
+            {
+                await GoToGameAsync($"#symbol_{gameType}");
+            }
 
             if (!await CheckSelectorExist(gameSelector!))
                 return false;
@@ -560,7 +591,15 @@ namespace Avalonia.WebView2.Demo.Views
                 var body = page.Locator(matchSelector);
                 if (!await body.IsVisibleAsync())
                 {
-                    await page.Locator(leagueSelector).ClickAsync();
+                    await page.Locator(leagueSelector).AllAsync().ContinueWith(async locs =>
+                    {
+                        if (locs.Result.Count > 0)
+                        {
+                            var firstLeague = locs.Result[0];
+                            await firstLeague.ClickAsync();
+                        }
+                    });
+                    // await page.Locator(leagueSelector).ClickAsync();
                     try
                     {
                         await body.WaitForAsync(new LocatorWaitForOptions
@@ -571,13 +610,13 @@ namespace Avalonia.WebView2.Demo.Views
                     }
                     catch
                     {
-                        
+
                     }
                 }
             }
             catch
             {
-                
+
             }
         }
 
@@ -588,7 +627,10 @@ namespace Avalonia.WebView2.Demo.Views
         {
             await GoToTabAsync("#early_page");
 
-            await GoToGameAsync($"#symbol_{gameType}");
+            if (EnableGoToGameCheckBox?.IsChecked == true)
+            {
+                await GoToGameAsync($"#symbol_{gameType}");
+            }
 
             if (!await CheckSelectorExist(leagueSelector))
                 return false;
