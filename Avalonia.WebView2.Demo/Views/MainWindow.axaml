@@ -55,6 +55,10 @@
                         Grid.Column="1"
                         Margin="5,0,0,0"
                         Padding="10,0"
+						Height="30"
+						Width="100"
+						VerticalContentAlignment="Center"
+						HorizontalContentAlignment="Center"
                         Content="Paste"
                         Click="PasteButton_Click"/>
 				</Grid>

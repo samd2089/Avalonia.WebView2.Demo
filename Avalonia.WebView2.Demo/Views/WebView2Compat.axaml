@@ -3,17 +3,17 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:wv2="clr-namespace:Avalonia.Controls;assembly=Avalonia.WebView2"
-			 mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
              x:Class="Avalonia.WebView2.Demo.WebView2Compat">
 
-	<Grid>
-		<TextBlock
+    <Grid x:Name="RootGrid">
+        <TextBlock
             x:Name="TextBlock"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
             FontSize="24"
             Text="Loading…" />
-		<wv2:WebView2 x:Name="WebView2" />
-	</Grid>
-	
+        <wv2:WebView2 x:Name="InnerWebView2" />
+    </Grid>
+    
 </UserControl>

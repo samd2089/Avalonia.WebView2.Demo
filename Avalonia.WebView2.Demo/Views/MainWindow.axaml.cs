@@ -3,12 +3,16 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.Playwright;
 using Microsoft.Web.WebView2.Core;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -31,19 +35,113 @@ namespace Avalonia.WebView2.Demo.Views
         public MainWindow()
         {
             InitializeComponent();
-            InitializeWebView2();
+            LoadSettings();
+            // Delay initialization until Window is opened to ensure visual tree is ready
+            this.Opened += async (_, __) =>
+            {
+                await InitializeWebView2();
+            };
         }
 
         private string _initialUrl = "";
         private bool _isInitialized = false;
         private string? _proxyAddress;
 
-        private async void InitializeWebView2()
+        private string GetConfigPath()
+        {
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Avalonia.WebView2.Demo");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "settings.json");
+        }
+
+        private void LoadSettings()
+        {
+            try
+            {
+                var path = GetConfigPath();
+                if (File.Exists(path))
+                {
+                    var json = File.ReadAllText(path);
+                    var model = JsonSerializer.Deserialize<AppSettings>(json);
+                    _proxyAddress = model?.ProxyAddress;
+                    if (GlobalProxyTextBox != null)
+                    {
+                        GlobalProxyTextBox.Text = _proxyAddress;
+                    }
+                    if (!string.IsNullOrWhiteSpace(_proxyAddress))
+                        AddDownloadItem($"Loaded proxy: {_proxyAddress}", "Info");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddDownloadItem($"Load settings failed: {ex.Message}", "Error");
+            }
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                var path = GetConfigPath();
+                var json = JsonSerializer.Serialize(new AppSettings { ProxyAddress = _proxyAddress });
+                File.WriteAllText(path, json);
+                AddDownloadItem("Settings saved.", "Success");
+            }
+            catch (Exception ex)
+            {
+                AddDownloadItem($"Save settings failed: {ex.Message}", "Error");
+            }
+        }
+
+        private class AppSettings
+        {
+            public string? ProxyAddress { get; set; }
+        }
+
+        private async Task EnsureWebViewReadyAsync()
+        {
+            // wait until WebView control is attached to visual tree
+            if (WebView2CompatControl == null)
+                return;
+
+            var tcs = new TaskCompletionSource<bool>();
+            void OnAttached(object? s, VisualTreeAttachmentEventArgs e)
+            {
+                tcs.TrySetResult(true);
+            }
+
+            if (WebView != null && WebView2CompatControl.IsAttachedToVisualTree())
+            {
+                return;
+            }
+
+            WebView2CompatControl.AttachedToVisualTree += OnAttached;
+            try
+            {
+                // also post to next UI tick to ensure layout pass
+                await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
+                await Task.WhenAny(tcs.Task, Task.Delay(2000));
+            }
+            finally
+            {
+                WebView2CompatControl.AttachedToVisualTree -= OnAttached;
+            }
+        }
+
+        private async Task InitializeWebView2()
         {
             if (_isInitialized) return;
 
             try
             {
+                await EnsureWebViewReadyAsync();
+
+                if (WebView is null)
+                {
+                    // Safeguard: schedule later if WebView not ready yet
+                    await Dispatcher.UIThread.InvokeAsync(async () => await InitializeWebView2(), DispatcherPriority.Background);
+                    return;
+                }
                 // initialize WebView2
                 var environment = await CoreWebView2Environment.CreateAsync(
                     null,
@@ -314,10 +412,7 @@ namespace Avalonia.WebView2.Demo.Views
                             Force = false
                         });
 
-                        if (!string.IsNullOrWhiteSpace(amount))
-                            return await Order(amount);
-
-                        return true;
+                        return await Order(amount);
                     }
                 }
                 catch (TimeoutException)
@@ -353,12 +448,17 @@ namespace Avalonia.WebView2.Demo.Views
                     await loc.ClickAsync();
                     
                     await Task.Delay(1000);
-                    
-                    await loc.FillAsync(amount);
-                    
-                    await loc.PressAsync("Space");
+
+                    if (!string.IsNullOrWhiteSpace(amount))
+                    {
+                        await loc.FillAsync(amount);
+
+                        await loc.PressAsync("Space");
+                    }
                     
                     await Task.Delay(300);
+
+                    await ShowLimit();
 
                     return true;
                 }
@@ -369,6 +469,19 @@ namespace Avalonia.WebView2.Demo.Views
             }
 
             return false;
+        }
+
+        private async Task ShowLimit()
+        {
+            try
+            {
+                var loc = page.Locator("#div_showlimit");
+                if (await loc.IsVisibleAsync() && await loc.IsEnabledAsync())
+                {
+                    await loc.ClickAsync();
+                }
+            }
+            catch { }
         }
 
         private async Task CloseOrder()
@@ -742,10 +855,78 @@ namespace Avalonia.WebView2.Demo.Views
             _proxyAddress = GlobalProxyTextBox.Text;
             AddDownloadItem($"Applying new proxy setting: {_proxyAddress}", "Info");
 
-            // Re-initialize WebView2 with the new proxy settings
-            _isInitialized = false;
+            // persist settings
+            SaveSettings();
 
-            InitializeWebView2();
+            AddDownloadItem("Proxy saved. Restarting app to apply settings...", "Info");
+            RestartApp();
+        }
+
+        private void RestartApp()
+        {
+            try
+            {
+                var exePath = Environment.ProcessPath;
+                if (string.IsNullOrWhiteSpace(exePath))
+                {
+                    exePath = Process.GetCurrentProcess().MainModule?.FileName;
+                }
+
+                if (!string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath))
+                {
+                    var startInfo = new ProcessStartInfo
+                    {
+                        FileName = exePath,
+                        UseShellExecute = true,
+                        WorkingDirectory = Path.GetDirectoryName(exePath)!
+                    };
+                    Process.Start(startInfo);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddDownloadItem($"Failed to restart automatically: {ex.Message}", "Error");
+            }
+            finally
+            {
+                // Exit current process
+                Environment.Exit(0);
+            }
+        }
+
+        private async Task CleanupAndRecreateWebViewAsync()
+        {
+            try
+            {
+                // Detach page event
+                if (page != null)
+                {
+                    page.Response -= Page_Response;
+                }
+
+                // Close browser connection
+                if (browser != null)
+                {
+                    try { await browser.CloseAsync(); } catch { }
+                    browser = null;
+                }
+
+                // Dispose playwright
+                if (playwright != null)
+                {
+                    try { playwright.Dispose(); } catch { }
+                    playwright = null;
+                }
+            }
+            catch { }
+
+            page = null;
+
+            // Replace the WebView2 control to avoid reusing an initialized instance
+            WebView2CompatControl?.ReplaceWebView2();
+
+            // Allow re-init
+            _isInitialized = false;
         }
 
         private void AddDownloadItem(string message, string type)
