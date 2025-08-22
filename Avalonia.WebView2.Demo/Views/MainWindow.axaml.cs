@@ -1,9 +1,11 @@
 using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text;
 using System.Diagnostics;
 using Microsoft.Playwright;
 using Microsoft.Web.WebView2.Core;
@@ -13,7 +15,9 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using Avalonia.Layout;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Threading;
 using System.Threading.Tasks;
 using YoutubeExplode;
@@ -31,16 +35,88 @@ namespace Avalonia.WebView2.Demo.Views
         IBrowser? browser;
         IPage? page;
         bool? isHg;
+        
+        // Status tracking related fields
+        private readonly System.Diagnostics.Stopwatch _operationStopwatch = new System.Diagnostics.Stopwatch();
+        private string _currentStep = "";
+        private CancellationTokenSource? _timerCts;
+        
+        // AI Chat related fields
+        private string? _apiKey;
+        private readonly ObservableCollection<ChatMessage> _chatHistory = new ObservableCollection<ChatMessage>();
 
         public MainWindow()
         {
             InitializeComponent();
             LoadSettings();
+            LoadChatSettings();
+            InitializeChatUI();
             // Delay initialization until Window is opened to ensure visual tree is ready
             this.Opened += async (_, __) =>
             {
                 await InitializeWebView2();
             };
+        }
+        
+        // Status update related methods
+        private void UpdateStatus(string message, bool startTimer = false, bool stopTimer = false)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (StatusTextBlock != null)
+                {
+                    StatusTextBlock.Text = message;
+                }
+                
+                if (startTimer)
+                {
+                    _operationStopwatch.Restart();
+                    _currentStep = message;
+                    StartTimerUpdates();
+                }
+                
+                if (stopTimer)
+                {
+                    _operationStopwatch.Stop();
+                    StopTimerUpdates();
+                    if (TimerTextBlock != null)
+                    {
+                        TimerTextBlock.Text = $"Total time: {_operationStopwatch.ElapsedMilliseconds}ms";
+                    }
+                }
+            });
+        }
+        
+        private void StartTimerUpdates()
+        {
+            StopTimerUpdates(); // Stop previous timer
+            _timerCts = new CancellationTokenSource();
+            
+            Task.Run(async () =>
+            {
+                while (!_timerCts.Token.IsCancellationRequested)
+                {
+                    await Task.Delay(100, _timerCts.Token);
+                    
+                    if (!_timerCts.Token.IsCancellationRequested)
+                    {
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            if (TimerTextBlock != null && _operationStopwatch.IsRunning)
+                            {
+                                TimerTextBlock.Text = $"Current step time: {_operationStopwatch.ElapsedMilliseconds}ms";
+                            }
+                        });
+                    }
+                }
+            }, _timerCts.Token);
+        }
+        
+        private void StopTimerUpdates()
+        {
+            _timerCts?.Cancel();
+            _timerCts?.Dispose();
+            _timerCts = null;
         }
 
         private string _initialUrl = "";
@@ -380,13 +456,36 @@ namespace Avalonia.WebView2.Demo.Views
 
         private async Task Performance(string gameType, string leagueId, string ecid, string betType, string betItem, string handicap, string odds, string amount, string action)
         {
-            var opened = await FindMatchAcrossTabsAsync(gameType, leagueId: leagueId, ecid: ecid);
-
-            if (opened)
+            var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            UpdateStatus($"Starting betting operation - Game: {gameType}, Match: {ecid}", startTimer: true);
+            
+            try
             {
+                var opened = await FindMatchAcrossTabsAsync(gameType, leagueId: leagueId, ecid: ecid);
 
-                var options = new List<string> { betItem, handicap, odds };
-                await TryClickExactOddsNowAsync(page, gameType, ecid, betType, string.Join(" ", options), amount);
+                if (opened)
+                {
+                    UpdateStatus("Attempting to click odds...");
+                    var options = new List<string> { betItem, handicap, odds };
+                    var success = await TryClickExactOddsNowAsync(page, gameType, ecid, betType, string.Join(" ", options), amount);
+                    
+                    if (success)
+                    {
+                        UpdateStatus($"Betting operation completed! Total time: {totalStopwatch.ElapsedMilliseconds}ms", stopTimer: true);
+                    }
+                    else
+                    {
+                        UpdateStatus($"Betting operation failed. Total time: {totalStopwatch.ElapsedMilliseconds}ms", stopTimer: true);
+                    }
+                }
+                else
+                {
+                    UpdateStatus($"Match not found, operation failed. Total time: {totalStopwatch.ElapsedMilliseconds}ms", stopTimer: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus($"Execution exception: {ex.Message}. Total time: {totalStopwatch.ElapsedMilliseconds}ms", stopTimer: true);
             }
         }
 
@@ -397,7 +496,7 @@ namespace Avalonia.WebView2.Demo.Views
 
             try
             {
-                await page.Locator(parentDivsSelector).First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 5000 });
+                await page.Locator(parentDivsSelector).First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 10000 });
             }
             catch (TimeoutException)
             {
@@ -536,28 +635,57 @@ namespace Avalonia.WebView2.Demo.Views
             string ecid
             )
         {
-            await CloseOrder();
-
-            var todayFirst = TodayFirstCheckBox?.IsChecked == true;
-
-            if (todayFirst)
+            UpdateStatus("Starting match search...", startTimer: true);
+            
+            try
             {
-                if (await TryFindMatchInTodayAsync(gameType, $"#game_{ecid}", $"#mainShow_{ecid}", $"#LEG_{leagueId}"))
-                    return true;
+                UpdateStatus("Closing order window...");
+                await CloseOrder();
 
-                if (await TryFindMatchInEarlyAsync(gameType, $"#mainShow_{ecid}", $"#league_{leagueId}"))
-                    return true;
+                var todayFirst = TodayFirstCheckBox?.IsChecked == true;
+                UpdateStatus($"Checking search strategy: {(todayFirst ? "Today first" : "Early first")}");
+
+                if (todayFirst)
+                {
+                    UpdateStatus("Searching match in Today page...");
+                    if (await TryFindMatchInTodayAsync(gameType, $"#game_{ecid}", $"#mainShow_{ecid}", $"#LEG_{leagueId}"))
+                    {
+                        UpdateStatus("Match found in Today page!", stopTimer: true);
+                        return true;
+                    }
+
+                    UpdateStatus("Searching match in Early page...");
+                    if (await TryFindMatchInEarlyAsync(gameType, $"#mainShow_{ecid}", $"#league_{leagueId}"))
+                    {
+                        UpdateStatus("Match found in Early page!", stopTimer: true);
+                        return true;
+                    }
+                }
+                else
+                {
+                    UpdateStatus("Searching match in Early page...");
+                    if (await TryFindMatchInEarlyAsync(gameType, $"#mainShow_{ecid}", $"#league_{leagueId}"))
+                    {
+                        UpdateStatus("Match found in Early page!", stopTimer: true);
+                        return true;
+                    }
+
+                    UpdateStatus("Searching match in Today page...");
+                    if (await TryFindMatchInTodayAsync(gameType, $"#game_{ecid}", $"#mainShow_{ecid}", $"#LEG_{leagueId}"))
+                    {
+                        UpdateStatus("Match found in Today page!", stopTimer: true);
+                        return true;
+                    }
+                }
+
+                UpdateStatus("Match not found", stopTimer: true);
+                return false;
             }
-            else
+            catch (Exception ex)
             {
-                if (await TryFindMatchInEarlyAsync(gameType, $"#mainShow_{ecid}", $"#league_{leagueId}"))
-                    return true;
-
-                if (await TryFindMatchInTodayAsync(gameType, $"#game_{ecid}", $"#mainShow_{ecid}", $"#LEG_{leagueId}"))
-                    return true;
+                UpdateStatus($"Match search failed: {ex.Message}", stopTimer: true);
+                return false;
             }
-
-            return false;
         }
 
         private async Task<bool> TryFindMatchInTodayAsync(
@@ -566,21 +694,45 @@ namespace Avalonia.WebView2.Demo.Views
             string matchSelector,
             string leagueSelector)
         {
-
+            var stepStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            
+            UpdateStatus("Navigating to Today page...");
             await GoToTabAsync("#today_page");
+            
+            UpdateStatus($"Navigation to Today page completed ({stepStopwatch.ElapsedMilliseconds}ms)");
+            stepStopwatch.Restart();
 
-            if (EnableGoToGameCheckBox?.IsChecked == true)
+            if (EnableGoToGameCheckBox?.IsChecked == true || gameType == "bk")
             {
+                UpdateStatus($"Navigating to game type: {gameType}...");
                 await GoToGameAsync($"#symbol_{gameType}");
+                UpdateStatus($"Navigation to game type completed ({stepStopwatch.ElapsedMilliseconds}ms)");
+                stepStopwatch.Restart();
             }
 
+            UpdateStatus("Checking if game element exists...");
             if (!await CheckSelectorExist(gameSelector!))
+            {
+                UpdateStatus($"Game element does not exist: {gameSelector} ({stepStopwatch.ElapsedMilliseconds}ms)");
                 return false;
+            }
+            
+            UpdateStatus($"Game element exists ({stepStopwatch.ElapsedMilliseconds}ms)");
+            stepStopwatch.Restart();
 
+            UpdateStatus("Ensuring league is expanded...");
             await EnsureLeagueExpandedAsync(gameSelector, leagueSelector);
+            UpdateStatus($"League expansion operation completed ({stepStopwatch.ElapsedMilliseconds}ms)");
+            stepStopwatch.Restart();
 
-            if (await TryOpenMatchByIdNowAsync(matchSelector)) return true;
-
+            UpdateStatus("Attempting to open match...");
+            if (await TryOpenMatchByIdNowAsync(matchSelector))
+            {
+                UpdateStatus($"Successfully opened match ({stepStopwatch.ElapsedMilliseconds}ms)");
+                return true;
+            }
+            
+            UpdateStatus($"Failed to open match ({stepStopwatch.ElapsedMilliseconds}ms)");
             return false;
         }
 
@@ -625,41 +777,76 @@ namespace Avalonia.WebView2.Demo.Views
             string matchSelector,
             string leagueSelector)
         {
+            var stepStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            
+            UpdateStatus("Navigating to Early page...");
             await GoToTabAsync("#early_page");
+            UpdateStatus($"Navigation to Early page completed ({stepStopwatch.ElapsedMilliseconds}ms)");
+            stepStopwatch.Restart();
 
-            if (EnableGoToGameCheckBox?.IsChecked == true)
+            if (EnableGoToGameCheckBox?.IsChecked == true || gameType == "bk")
             {
+                UpdateStatus($"Navigating to game type: {gameType}...");
                 await GoToGameAsync($"#symbol_{gameType}");
+                UpdateStatus($"Navigation to game type completed ({stepStopwatch.ElapsedMilliseconds}ms)");
+                stepStopwatch.Restart();
             }
 
+            UpdateStatus("Checking if league element exists...");
             if (!await CheckSelectorExist(leagueSelector))
+            {
+                UpdateStatus($"League element does not exist: {leagueSelector} ({stepStopwatch.ElapsedMilliseconds}ms)");
                 return false;
+            }
+            
+            UpdateStatus($"League element exists ({stepStopwatch.ElapsedMilliseconds}ms)");
+            stepStopwatch.Restart();
 
             var regionBodySelector = string.Empty;
             var regionHeadSelector = string.Empty;
 
+            UpdateStatus("Checking league visibility...");
             var visbility = await CheckSelectorVisbileAsync(leagueSelector);
             if (!visbility)
             {
+                UpdateStatus("League not visible, getting parent element...");
                 var parentLocator = page.Locator(leagueSelector).Locator("..");
                 var parentId = await parentLocator.GetAttributeAsync("id");
 
                 regionBodySelector = $"#{parentId}";
                 regionHeadSelector = $"#{parentId?.Replace("body", "head")}";
+                UpdateStatus($"Parent element retrieval completed ({stepStopwatch.ElapsedMilliseconds}ms)");
             }
+            else
+            {
+                UpdateStatus($"League is already visible ({stepStopwatch.ElapsedMilliseconds}ms)");
+            }
+            stepStopwatch.Restart();
 
             if (!string.IsNullOrWhiteSpace(regionBodySelector) && !string.IsNullOrWhiteSpace(regionHeadSelector))
             {
+                UpdateStatus("Ensuring region is expanded...");
                 await EnsureRegionExpandedAsync(regionBodySelector!, regionHeadSelector!);
+                UpdateStatus($"Region expansion operation completed ({stepStopwatch.ElapsedMilliseconds}ms)");
+                stepStopwatch.Restart();
             }
 
             if (!string.IsNullOrWhiteSpace(leagueSelector))
             {
+                UpdateStatus("Attempting to open league...");
                 await TryOpenLeagueIfExistsAsync(leagueSelector!);
+                UpdateStatus($"League opening operation completed ({stepStopwatch.ElapsedMilliseconds}ms)");
+                stepStopwatch.Restart();
             }
 
-            if (await TryOpenMatchByIdNowAsync(matchSelector)) return true;
-
+            UpdateStatus("Attempting to open match...");
+            if (await TryOpenMatchByIdNowAsync(matchSelector))
+            {
+                UpdateStatus($"Successfully opened match ({stepStopwatch.ElapsedMilliseconds}ms)");
+                return true;
+            }
+            
+            UpdateStatus($"Failed to open match ({stepStopwatch.ElapsedMilliseconds}ms)");
             return false;
         }
 
@@ -691,7 +878,7 @@ namespace Avalonia.WebView2.Demo.Views
             }
         }
 
-        private async Task WaitLoadingHiddenAsync(int timeoutMs = 20000)
+        private async Task WaitLoadingHiddenAsync(int timeoutMs = 30000)
         {
             try
             {
@@ -1019,5 +1206,447 @@ namespace Avalonia.WebView2.Demo.Views
                 await PerformSearch();
             }
         }
+        
+        // AI Chat related methods
+        private void InitializeChatUI()
+        {
+            // Don't set ItemsSource, we'll manage Items directly
+            // This avoids the "ItemsSource is in use" error
+        }
+        
+        private async void SaveApiKey_Click(object? sender, RoutedEventArgs e)
+        {
+            _apiKey = ApiKeyTextBox?.Text;
+            if (!string.IsNullOrWhiteSpace(_apiKey))
+            {
+                try
+                {
+                    var settings = LoadChatSettings();
+                    settings.ApiKey = _apiKey;
+                    SaveChatSettings(settings);
+                    AddChatMessage("System", "API Key saved successfully.", "#E0E0E0");
+                    UpdateStatus("OpenRouter API Key saved");
+                }
+                catch (Exception ex)
+                {
+                    AddChatMessage("System", $"Error saving API Key: {ex.Message}", "#FFB0B0");
+                    UpdateStatus($"Error saving API Key: {ex.Message}");
+                }
+            }
+            else
+            {
+                AddChatMessage("System", "Please enter a valid API Key.", "#FFB0B0");
+            }
+        }
+        
+        private async void TestConnection_Click(object? sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_apiKey))
+            {
+                AddChatMessage("System", "Please save an API Key first.", "#FFB0B0");
+                return;
+            }
+            
+            UpdateStatus("Testing OpenRouter connection...", startTimer: true);
+            
+            try
+            {
+                var testMessage = new
+                {
+                    model = GetSelectedModel(),
+                    messages = new[]
+                    {
+                        new { role = "user", content = "Hello! This is a connection test." }
+                    },
+                    max_tokens = 50
+                };
+                
+                var response = await SendRequestToOpenRouter(testMessage);
+                if (response.HasValue)
+                {
+                    AddChatMessage("System", "Connection test successful!", "#B0FFB0");
+                    UpdateStatus("OpenRouter connection test successful", stopTimer: true);
+                }
+                else
+                {
+                    AddChatMessage("System", "Connection test failed. Please check your API Key and try again.", "#FFB0B0");
+                    UpdateStatus("OpenRouter connection test failed", stopTimer: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddChatMessage("System", $"Connection test error: {ex.Message}", "#FFB0B0");
+                UpdateStatus($"Connection test error: {ex.Message}", stopTimer: true);
+            }
+        }
+        
+        private async void DebugApi_Click(object? sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_apiKey))
+            {
+                AddChatMessage("System", "Please save an API Key first.", "#FFB0B0");
+                return;
+            }
+            
+            AddChatMessage("Debug", "=== API Debug Information ===", "#F0F0F0");
+            AddChatMessage("Debug", $"API Key Length: {_apiKey.Length}", "#F0F0F0");
+            AddChatMessage("Debug", $"API Key Prefix: {_apiKey.Substring(0, Math.Min(10, _apiKey.Length))}...", "#F0F0F0");
+            AddChatMessage("Debug", $"Selected Model: {GetSelectedModel()}", "#F0F0F0");
+            AddChatMessage("Debug", $"OpenRouter Endpoint: https://openrouter.ai/api/v1/chat/completions", "#F0F0F0");
+            
+            // Test basic HTTP connectivity
+            try
+            {
+                using var client = new HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(10);
+                var response = await client.GetAsync("https://openrouter.ai");
+                AddChatMessage("Debug", $"OpenRouter Website Accessible: {response.IsSuccessStatusCode} ({response.StatusCode})", "#F0F0F0");
+            }
+            catch (Exception ex)
+            {
+                AddChatMessage("Debug", $"OpenRouter Website Access Error: {ex.Message}", "#FFB0B0");
+            }
+            
+            // Test API with minimal request
+            try
+            {
+                AddChatMessage("Debug", "Testing minimal API request...", "#F0F0F0");
+                
+                var minimalRequest = new
+                {
+                    model = "openai/gpt-4o-mini", // Use a reliable model
+                    messages = new[]
+                    {
+                        new { role = "user", content = "Hi" }
+                    },
+                    max_tokens = 10
+                };
+                
+                var response = await SendRequestToOpenRouter(minimalRequest);
+                if (response.HasValue)
+                {
+                    AddChatMessage("Debug", "Minimal API request successful!", "#B0FFB0");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddChatMessage("Debug", $"Minimal API request failed: {ex.Message}", "#FFB0B0");
+            }
+            
+            AddChatMessage("Debug", "=== Debug Complete ===", "#F0F0F0");
+        }
+        
+        private async void SendMessage_Click(object? sender, RoutedEventArgs e)
+        {
+            await SendChatMessage();
+        }
+        
+        private async void MessageTextBox_KeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter && !e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+            {
+                e.Handled = true;
+                await SendChatMessage();
+            }
+        }
+        
+        private async Task SendChatMessage()
+        {
+            var message = MessageTextBox?.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+                
+            if (string.IsNullOrWhiteSpace(_apiKey))
+            {
+                AddChatMessage("System", "Please save an API Key first.", "#FFB0B0");
+                return;
+            }
+            
+            // Clear input
+            if (MessageTextBox != null)
+                MessageTextBox.Text = string.Empty;
+            
+            // Add user message to UI
+            AddChatMessage("User", message, "#B0D4FF");
+            
+            UpdateStatus("Sending message to AI...", startTimer: true);
+            
+            try
+            {
+                // Prepare messages for API - include the current message
+                var apiMessages = new List<object>();
+                
+                // Add previous conversation context (last 9 messages to leave room for current message)
+                var previousMessages = _chatHistory
+                    .Where(m => m.Role == "User" || m.Role == "Assistant")
+                    .TakeLast(9) // Leave room for current user message
+                    .Select(m => new { role = m.Role.ToLower(), content = m.Content });
+                
+                apiMessages.AddRange(previousMessages);
+                
+                // Add current user message
+                apiMessages.Add(new { role = "user", content = message });
+                
+                // Ensure we have at least one message
+                if (apiMessages.Count == 0)
+                {
+                    apiMessages.Add(new { role = "user", content = message });
+                }
+                
+                var requestBody = new
+                {
+                    model = GetSelectedModel(),
+                    messages = apiMessages.ToArray(),
+                    max_tokens = 1000,
+                    temperature = 0.7
+                };
+                
+                var response = await SendRequestToOpenRouter(requestBody);
+                
+                if (response.HasValue && response.Value.TryGetProperty("choices", out var choices) && 
+                    choices.GetArrayLength() > 0)
+                {
+                    var choice = choices[0];
+                    if (choice.TryGetProperty("message", out var responseMessage) &&
+                        responseMessage.TryGetProperty("content", out var content))
+                    {
+                        var aiResponse = content.GetString() ?? "No response";
+                        AddChatMessage("Assistant", aiResponse, "#E0FFE0");
+                        UpdateStatus("AI response received", stopTimer: true);
+                    }
+                    else
+                    {
+                        AddChatMessage("System", "Invalid response format from AI", "#FFB0B0");
+                        UpdateStatus("Invalid AI response format", stopTimer: true);
+                    }
+                }
+                else
+                {
+                    AddChatMessage("System", "No response from AI. Please try again.", "#FFB0B0");
+                    UpdateStatus("No AI response received", stopTimer: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddChatMessage("System", $"Error: {ex.Message}", "#FFB0B0");
+                UpdateStatus($"AI chat error: {ex.Message}", stopTimer: true);
+            }
+        }
+        
+        private void ClearChat_Click(object? sender, RoutedEventArgs e)
+        {
+            _chatHistory.Clear();
+            ChatHistoryListBox?.Items?.Clear();
+            AddChatMessage("System", "Chat history cleared.", "#E0E0E0");
+            UpdateStatus("Chat history cleared");
+        }
+        
+        private string GetSelectedModel()
+        {
+            var selectedItem = ModelComboBox?.SelectedItem as ComboBoxItem;
+            return selectedItem?.Content?.ToString() ?? "anthropic/claude-3.5-sonnet";
+        }
+        
+        private async Task<JsonElement?> SendRequestToOpenRouter(object requestBody)
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(requestBody);
+                
+                // Create a new HttpRequestMessage for each request
+                using var httpClient = new HttpClient();
+                httpClient.Timeout = TimeSpan.FromSeconds(60);
+                
+                using var request = new HttpRequestMessage(HttpMethod.Post, "https://openrouter.ai/api/v1/chat/completions");
+                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                
+                // Set headers on the request, not on the client
+                request.Headers.Add("Authorization", $"Bearer {_apiKey}");
+                request.Headers.Add("HTTP-Referer", "https://avalonia-webview2-demo.local");
+                request.Headers.Add("X-Title", "Avalonia WebView2 Demo");
+                
+                var response = await httpClient.SendAsync(request);
+                var responseString = await response.Content.ReadAsStringAsync();
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    try
+                    {
+                        return JsonSerializer.Deserialize<JsonElement>(responseString);
+                    }
+                    catch (JsonException jsonEx)
+                    {
+                        throw new Exception($"Failed to parse JSON response: {jsonEx.Message}. Raw response: {responseString}");
+                    }
+                }
+                else
+                {
+                    // Parse error response if possible
+                    try
+                    {
+                        var errorJson = JsonSerializer.Deserialize<JsonElement>(responseString);
+                        if (errorJson.TryGetProperty("error", out var errorObj))
+                        {
+                            var errorMessage = "Unknown error";
+                            var errorCode = "Unknown";
+                            
+                            if (errorObj.TryGetProperty("message", out var msgElement))
+                                errorMessage = msgElement.GetString() ?? "Unknown error";
+                            
+                            if (errorObj.TryGetProperty("code", out var codeElement))
+                                errorCode = codeElement.GetString() ?? "Unknown";
+                            
+                            throw new Exception($"OpenRouter API Error [{errorCode}]: {errorMessage}");
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // If we can't parse the error, return the raw response
+                    }
+                    
+                    throw new Exception($"API Error: {response.StatusCode} - {responseString}");
+                }
+            }
+            catch (HttpRequestException httpEx)
+            {
+                throw new Exception($"Network error: {httpEx.Message}");
+            }
+            catch (TaskCanceledException timeoutEx)
+            {
+                throw new Exception($"Request timeout: {timeoutEx.Message}");
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Request failed: {ex.Message}");
+            }
+        }
+        
+        private void AddChatMessage(string role, string content, string backgroundColor)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                // Create UI element directly
+                var border = new Border
+                {
+                    Margin = new Thickness(5),
+                    Padding = new Thickness(10),
+                    CornerRadius = new CornerRadius(5),
+                    Background = new SolidColorBrush(Color.Parse(backgroundColor))
+                };
+                
+                var stackPanel = new StackPanel();
+                
+                var roleText = new TextBlock
+                {
+                    Text = role,
+                    FontWeight = FontWeight.Bold,
+                    Margin = new Thickness(0, 0, 0, 5)
+                };
+                
+                var contentText = new TextBlock
+                {
+                    Text = content,
+                    TextWrapping = TextWrapping.Wrap
+                };
+                
+                var timestampText = new TextBlock
+                {
+                    Text = DateTime.Now.ToString("HH:mm:ss"),
+                    FontSize = 10,
+                    Foreground = Brushes.Gray,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Margin = new Thickness(0, 5, 0, 0)
+                };
+                
+                stackPanel.Children.Add(roleText);
+                stackPanel.Children.Add(contentText);
+                stackPanel.Children.Add(timestampText);
+                
+                border.Child = stackPanel;
+                
+                // Add to ListBox directly
+                var listBoxItem = new ListBoxItem { Content = border };
+                ChatHistoryListBox?.Items?.Add(listBoxItem);
+                
+                // Also store in collection for API context
+                var message = new ChatMessage
+                {
+                    Role = role,
+                    Content = content,
+                    Timestamp = DateTime.Now.ToString("HH:mm:ss"),
+                    BackgroundColor = backgroundColor
+                };
+                
+                _chatHistory.Add(message);
+                
+                // Auto-scroll to bottom
+                if (ChatHistoryListBox != null && ChatHistoryListBox.Items?.Count > 0)
+                {
+                    var lastItem = ChatHistoryListBox.Items[ChatHistoryListBox.Items.Count - 1];
+                    if (lastItem != null)
+                        ChatHistoryListBox.ScrollIntoView(lastItem);
+                }
+            });
+        }
+        
+        private ChatSettings LoadChatSettings()
+        {
+            try
+            {
+                var path = GetChatConfigPath();
+                if (File.Exists(path))
+                {
+                    var json = File.ReadAllText(path);
+                    var settings = JsonSerializer.Deserialize<ChatSettings>(json) ?? new ChatSettings();
+                    _apiKey = settings.ApiKey;
+                    if (ApiKeyTextBox != null && !string.IsNullOrWhiteSpace(_apiKey))
+                    {
+                        ApiKeyTextBox.Text = _apiKey;
+                    }
+                    return settings;
+                }
+            }
+            catch (Exception ex)
+            {
+                AddChatMessage("System", $"Error loading chat settings: {ex.Message}", "#FFB0B0");
+            }
+            return new ChatSettings();
+        }
+        
+        private void SaveChatSettings(ChatSettings settings)
+        {
+            try
+            {
+                var path = GetChatConfigPath();
+                var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(path, json);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to save chat settings: {ex.Message}");
+            }
+        }
+        
+        private string GetChatConfigPath()
+        {
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Avalonia.WebView2.Demo");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "chat-settings.json");
+        }
+    }
+    
+    // Chat message model
+    public class ChatMessage
+    {
+        public string Role { get; set; } = string.Empty;
+        public string Content { get; set; } = string.Empty;
+        public string Timestamp { get; set; } = string.Empty;
+        public string BackgroundColor { get; set; } = "#FFFFFF";
+    }
+    
+    // Chat settings model
+    public class ChatSettings
+    {
+        public string? ApiKey { get; set; }
     }
 }

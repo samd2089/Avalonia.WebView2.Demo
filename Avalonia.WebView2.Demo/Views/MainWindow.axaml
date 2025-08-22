@@ -16,7 +16,16 @@
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-	<TabControl>
+	<DockPanel>
+		<!-- Status bar -->
+		<Border DockPanel.Dock="Bottom" Background="#F0F0F0" Height="25" BorderBrush="Gray" BorderThickness="0,1,0,0">
+			<Grid ColumnDefinitions="*,Auto">
+				<TextBlock x:Name="StatusTextBlock" Text="Ready" Margin="5,0" VerticalAlignment="Center" Grid.Column="0"/>
+				<TextBlock x:Name="TimerTextBlock" Text="" Margin="5,0" VerticalAlignment="Center" Grid.Column="1"/>
+			</Grid>
+		</Border>
+		
+		<TabControl>
 		<TabItem VerticalContentAlignment="Center" Header="WebView2">
 			<Grid RowDefinitions="Auto Auto Auto * Auto" ShowGridLines="False">
 				<Label
@@ -92,6 +101,43 @@
 				<ListBox Grid.Row="2" x:Name="DownloadList"></ListBox>
 			</Grid>
 		</TabItem>
+		<TabItem VerticalContentAlignment="Center" Header="AI Chat">
+			<Grid RowDefinitions="Auto * Auto" ShowGridLines="False">
+				<!-- API Configuration Section -->
+				<StackPanel Grid.Row="0" Margin="10">
+					<TextBlock Text="OpenRouter API Configuration" FontWeight="Bold" Margin="0,0,0,10"/>
+					<StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+						<TextBox Name="ApiKeyTextBox" Watermark="Enter OpenRouter API Key" Width="400" PasswordChar="*"/>
+						<Button Name="SaveApiKeyButton" Content="Save" Click="SaveApiKey_Click" Margin="10,0,0,0"/>
+					</StackPanel>
+					<StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+						<TextBlock Text="Model: " VerticalAlignment="Center" Margin="0,0,5,0"/>
+						<ComboBox Name="ModelComboBox" Width="200">
+							<ComboBoxItem Content="anthropic/claude-3.5-sonnet" IsSelected="True"/>
+							<ComboBoxItem Content="openai/gpt-4o"/>
+							<ComboBoxItem Content="openai/gpt-4o-mini"/>
+							<ComboBoxItem Content="google/gemini-pro"/>
+						</ComboBox>
+						<Button Name="TestConnectionButton" Content="Test Connection" Click="TestConnection_Click" Margin="10,0,0,0"/>
+						<Button Name="DebugApiButton" Content="Debug API" Click="DebugApi_Click" Margin="5,0,0,0"/>
+					</StackPanel>
+				</StackPanel>
+				
+				<!-- Chat Area -->
+				<ScrollViewer Grid.Row="1" Margin="10,0,10,10">
+					<ListBox Name="ChatHistoryListBox" Background="White" BorderBrush="Gray" BorderThickness="1">
+						<!-- Simplified item template without complex binding -->
+					</ListBox>
+				</ScrollViewer>
+				
+				<!-- Input Area -->
+				<Grid Grid.Row="2" ColumnDefinitions="* Auto Auto" Margin="10">
+					<TextBox Name="MessageTextBox" Grid.Column="0" Watermark="Type your message here..." KeyDown="MessageTextBox_KeyDown" MinHeight="30" TextWrapping="Wrap" AcceptsReturn="True"/>
+					<Button Name="SendMessageButton" Grid.Column="1" Content="Send" Click="SendMessage_Click" Margin="5,0,0,0" Width="60"/>
+					<Button Name="ClearChatButton" Grid.Column="2" Content="Clear" Click="ClearChat_Click" Margin="5,0,0,0" Width="60"/>
+				</Grid>
+			</Grid>
+		</TabItem>
 		<TabItem VerticalContentAlignment="Center" Header="Setting">
 			<StackPanel Margin="10">
                 <TextBlock Text="GlobalProxySetting" FontWeight="Bold" Margin="0,0,0,10"/>
@@ -113,5 +159,5 @@
             </StackPanel>
 		</TabItem>
 	</TabControl>
-
+	</DockPanel>
 </Window>
