@@ -1,29 +1,30 @@
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
+using Microsoft.Playwright;
+using Microsoft.Web.WebView2.Core;
+using MsBox.Avalonia;
+using MsBox.Avalonia.Enums;
 using System;
 using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Text.Json;
 using System.Text;
-using System.Diagnostics;
-using Microsoft.Playwright;
-using Microsoft.Web.WebView2.Core;
-using Avalonia.Controls;
-using Avalonia.Input;
-using Avalonia.Interactivity;
-using Avalonia.Media;
-using Avalonia.Threading;
-using Avalonia.VisualTree;
-using Avalonia.Layout;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using YoutubeExplode;
 using YoutubeExplode.Videos;
 using YoutubeExplode.Videos.Streams;
-
 using WV2 = Avalonia.Controls.WebView2;
 
 namespace Avalonia.WebView2.Demo.Views
@@ -466,8 +467,8 @@ namespace Avalonia.WebView2.Demo.Views
                 if (opened)
                 {
                     UpdateStatus("Attempting to click odds...");
-                    var options = new List<string> { betItem, handicap, odds };
-                    var success = await TryClickExactOddsNowAsync(page, gameType, ecid, betType, string.Join(" ", options), amount);
+
+                    var success = await TryClickExactOddsNowAsync(page, gameType, ecid, betType, betItem, handicap, odds, amount);
                     
                     if (success)
                     {
@@ -489,10 +490,11 @@ namespace Avalonia.WebView2.Demo.Views
             }
         }
 
-        private async Task<bool> TryClickExactOddsNowAsync(IPage page, string gameType, string ecid, string betType, string text, string amount)
+        private async Task<bool> TryClickExactOddsNowAsync(IPage page, string gameType, string ecid, string betType, string betItem, string handicap, string odds, string amount)
         {
             var spliter = gameType == "ft" ? "FT" : "0";
             var parentDivsSelector = $"#body_{betType}_{spliter}_{ecid}";
+            var text = $"{betItem} {handicap} {odds}";
 
             try
             {
@@ -526,7 +528,7 @@ namespace Avalonia.WebView2.Demo.Views
                             Force = false
                         });
 
-                        return await Order(amount);
+                        return await Order(odds, amount);
                     }
                 }
                 catch (TimeoutException)
@@ -537,7 +539,7 @@ namespace Avalonia.WebView2.Demo.Views
             return false;
         }
 
-        private async Task<bool> Order(string amount)
+        private async Task<bool> Order(string odds, string amount)
         {
             try
             {
@@ -574,6 +576,8 @@ namespace Avalonia.WebView2.Demo.Views
 
                     await ShowLimit();
 
+                    await CompareOdds(odds);
+
                     return true;
                 }
             }
@@ -593,6 +597,28 @@ namespace Avalonia.WebView2.Demo.Views
                 if (await loc.IsVisibleAsync() && await loc.IsEnabledAsync())
                 {
                     await loc.ClickAsync();
+                }
+            }
+            catch { }
+        }
+
+        private async Task CompareOdds(string odds)
+        {
+            try
+            {
+                var loc = page.Locator("#bet_ior");
+
+                await loc.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 5000 });
+
+                if (await loc.IsVisibleAsync() && await loc.IsEnabledAsync())
+                {
+                    var showOdds = await loc.TextContentAsync();
+
+                    if(!string.IsNullOrWhiteSpace(showOdds) && odds != showOdds)
+                    {
+                        var box = MessageBoxManager.GetMessageBoxStandard("warning", "mismatch", ButtonEnum.Ok, icon: MsBox.Avalonia.Enums.Icon.Warning);
+                        await box.ShowWindowDialogAsync(this);
+                    }
                 }
             }
             catch { }
